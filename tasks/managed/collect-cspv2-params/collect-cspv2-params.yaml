@@ -1,0 +1,158 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-cspv2-params
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task that collects CSPv2 (Unified Downloads) configuration options from the data file.
+    This task looks at the data file in the workspace to extract params like endpoint, auth secret,
+    and environment configuration for downstream CSPv2 tasks.
+  params:
+    - name: dataPath
+      type: string
+      description: Path to the data JSON file in the data workspace
+    - name: snapshotPath
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the OCI repository
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: cspv2Endpoint
+      description: The endpoint URL for the CSPv2 (Unified Downloads) service
+    - name: cspv2Secret
+      description: The secret name for CSPv2 authentication credentials
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: collect-cspv2-params
+      image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+      computeResources:
+        limits:
+          memory: 192Mi
+        requests:
+          memory: 192Mi
+          cpu: 100m
+      command: ["/home/scripts/python/tasks/managed/collect_cspv2_params.py"]
+      args:
+        - "--work-dir"
+        - "$(params.dataDir)"
+        - "--data-json-path"
+        - "$(params.dataPath)"
+        - "--snapshot-path"
+        - "$(params.snapshotPath)"
+      env:
+        - name: RESULT_CSPV2_ENDPOINT
+          value: $(results.cspv2Endpoint.path)
+        - name: RESULT_CSPV2_SECRET
+          value: $(results.cspv2Secret.path)
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
