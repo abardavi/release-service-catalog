@@ -1,0 +1,94 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-to-cspv2-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to push artifacts to CSPv2 (Unified Downloads)
+  params:
+    - name: snapshot_json
+      type: string
+      description: String containing a JSON representation of the snapshot spec
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+  volumes:
+    - name: ud2-stage-crt
+      secret:
+        secretName: cspv2-stage-crt
+        defaultMode: 0444
+    - name: ud2-crt-key
+      secret:
+        secretName: cspv2-crt-key
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+      - name: ud2-stage-crt
+        mountPath: /mnt/ud2-secrets/certificate
+        readOnly: true
+      - name: ud2-crt-key
+        mountPath: /mnt/ud2-secrets/key
+        readOnly: true
+  steps:
+    - name: push-to-cspv2
+      image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 500m
+      env:
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+      script: |
+        #!/usr/bin/env bash
+        set -eo pipefail
+
+        connectivity='{}'
+
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.stage.rhsm.redhat.com/80' ; rc=$?
+        echo "stage 80 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."stage-80" = $rc' <<< "${connectivity}")
+
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.stage.rhsm.redhat.com/443' ; rc=$?
+        echo "stage 443 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."stage-443" = $rc' <<< "${connectivity}")
+
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.rhsm.redhat.com/80' ; rc=$?
+        echo "prod 80 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."prod-80" = $rc' <<< "${connectivity}")
+
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.rhsm.redhat.com/443' ; rc=$?
+        echo "prod 443 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."prod-443" = $rc' <<< "${connectivity}")
+
+        echo "Connectivity results: ${connectivity}"
+
+        echo -n "Success" > "${RESULT_RESULT}"

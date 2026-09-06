@@ -8,61 +8,22 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task that pushes signed artifacts to CSPv2 (Unified Downloads).
-    It uses InternalRequests to delegate the actual push to an internal pipeline.
+    Tekton task that creates an InternalRequest to check connectivity
+    to CSPv2 (Unified Downloads).
   params:
-    - name: snapshotPath
-      description: Path to the JSON string of the Snapshot spec in the data workspace
-      type: string
-    - name: dataPath
-      type: string
-      description: Path to the data JSON file in the data workspace
-    - name: resultsDirPath
-      type: string
-      description: Path to the results directory in the data workspace
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
-    - name: cspv2Endpoint
-      type: string
-      description: The endpoint URL for the CSPv2 (Unified Downloads) service
-    - name: cspv2Environment
-      type: string
-      description: The target environment for CSPv2 (production, stage, qa)
-      default: "production"
-    - name: cspv2Secret
-      type: string
-      description: The secret name for CSPv2 authentication credentials
-    - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored
-      type: string
-      default: "empty"
-    - name: ociArtifactExpiresAfter
-      description: Expiration date for the trusted artifacts created in the OCI repository
-      type: string
-      default: "1d"
-    - name: trustedArtifactsDebug
-      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
-      type: string
-      default: ""
-    - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
-      type: string
-      default: ""
-    - name: sourceDataArtifact
-      type: string
-      description: Location of trusted artifacts to be used to populate data directory
-      default: ""
-    - name: dataDir
-      description: The location where data will be stored
-      type: string
-      default: /var/workdir/release
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: requestTimeout
+      type: string
+      default: "1800"
+      description: InternalRequest timeout
     - name: caTrustConfigMapName
       type: string
       description: The name of the ConfigMap to read CA bundle data from
@@ -73,13 +34,8 @@ spec:
       default: ca-bundle.crt
   results:
     - name: pushResult
-      description: Result of the push operation (pass/fail)
-    - name: sourceDataArtifact
-      type: string
-      description: Produced trusted data artifact
+      description: Result of the operation (pass/fail)
   volumes:
-    - name: workdir
-      emptyDir: {}
     - name: trusted-ca
       configMap:
         name: $(params.caTrustConfigMapName)
@@ -91,89 +47,46 @@ spec:
     securityContext:
       runAsUser: 1001
     volumeMounts:
-      - mountPath: /var/workdir
-        name: workdir
       - name: trusted-ca
         mountPath: /mnt/trusted-ca
         readOnly: true
-    env:
-      - name: IMAGE_EXPIRES_AFTER
-        value: $(params.ociArtifactExpiresAfter)
-      - name: "ORAS_OPTIONS"
-        value: "$(params.orasOptions)"
-      - name: "DEBUG"
-        value: "$(params.trustedArtifactsDebug)"
   steps:
-    - name: use-trusted-artifact
-      computeResources:
-        limits:
-          memory: 64Mi
-        requests:
-          memory: 64Mi
-          cpu: 30m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
-      params:
-        - name: workDir
-          value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(params.sourceDataArtifact)
-    - name: push-to-cspv2
+    - name: run-internal-request
       image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
       computeResources:
         limits:
           memory: 512Mi
         requests:
           memory: 512Mi
-          cpu: 650m
-      command: ["/home/scripts/python/tasks/managed/push_to_cspv2.py"]
-      args:
-        - "--work-dir"
-        - "$(params.dataDir)"
-        - "--snapshot-path"
-        - "$(params.snapshotPath)"
-        - "--data-json-path"
-        - "$(params.dataPath)"
-        - "--results-dir-path"
-        - "$(params.resultsDirPath)"
-        - "--pipeline-run-uid"
-        - "$(params.pipelineRunUid)"
-        - "--cspv2-endpoint"
-        - "$(params.cspv2Endpoint)"
-        - "--cspv2-environment"
-        - "$(params.cspv2Environment)"
-      env:
-        - name: RESULT_PUSH_RESULT
-          value: $(results.pushResult.path)
-        - name: CSPV2_SECRET
-          value: $(params.cspv2Secret)
-    - name: create-trusted-artifact
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 250m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
+          cpu: 50m
+      script: |
+        #!/usr/bin/env bash
+        set -eo pipefail
+
+        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+        TASK_ID=$(context.taskRun.uid)
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        IR_RESULT_FILE=$(mktemp)
+        trap 'rm -f "${IR_RESULT_FILE}"' EXIT
+
+        internal-request --pipeline "push-to-cspv2" \
+            -p taskGitUrl="$(params.taskGitUrl)" \
+            -p taskGitRevision="$(params.taskGitRevision)" \
+            -l ${TASK_LABEL}="${TASK_ID}" \
+            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+            -t "$(params.requestTimeout)" \
+            --pipeline-timeout 0h30m0s \
+            --task-timeout 0h20m0s \
+            --finally-timeout 0h10m0s \
+            -s true \
+            | tee "${IR_RESULT_FILE}" || \
+            (grep "^\[" "${IR_RESULT_FILE}" | jq . && exit 1)
+
+        internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_RESULT_FILE}")
+        echo "done (${internalRequest})"
+
+        results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
+        pushResult=$(echo "${results}" | jq -r '.result')
+        echo "Push result: ${pushResult}"
+        echo -n "${pushResult}" > "$(results.pushResult.path)"

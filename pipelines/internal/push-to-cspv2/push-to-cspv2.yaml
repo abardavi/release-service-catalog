@@ -1,0 +1,40 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: push-to-cspv2
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton Pipeline to push artifacts to CSPv2 (Unified Downloads)
+  params:
+    - name: snapshot_json
+      type: string
+      description: String containing a JSON representation of the snapshot spec
+    - name: taskGitUrl
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/abardavi/release-service-catalog.git
+      type: string
+    - name: taskGitRevision
+      description: The revision in the taskGitUrl repo to be used
+      type: string
+  tasks:
+    - name: push-to-cspv2-task
+      timeout: "24h00m0s"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/internal/push-to-cspv2-task/push-to-cspv2-task.yaml
+      params:
+        - name: snapshot_json
+          value: $(params.snapshot_json)
+  results:
+    - name: result
+      value: $(tasks.push-to-cspv2-task.results.result)
