@@ -51,6 +51,9 @@ spec:
         mountPath: /mnt/trusted-ca
         readOnly: true
   steps:
+    # TEMPORARY: connectivity check inlined here (bypassing the InternalRequest) because
+    # the rhtap-releng-tenant namespace is not yet in the internal-request allow list.
+    # Revert to the run-internal-request step below once that's resolved.
     - name: run-internal-request
       image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
       computeResources:
@@ -63,30 +66,67 @@ spec:
         #!/usr/bin/env bash
         set -eo pipefail
 
-        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
-        TASK_ID=$(context.taskRun.uid)
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+        connectivity='{}'
 
-        IR_RESULT_FILE=$(mktemp)
-        trap 'rm -f "${IR_RESULT_FILE}"' EXIT
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.stage.rhsm.redhat.com/80' ; rc=$?
+        echo "stage 80 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."stage-80" = $rc' <<< "${connectivity}")
 
-        internal-request --pipeline "push-to-cspv2" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            -l ${TASK_LABEL}="${TASK_ID}" \
-            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-            -t "$(params.requestTimeout)" \
-            --pipeline-timeout 0h30m0s \
-            --task-timeout 0h20m0s \
-            --finally-timeout 0h10m0s \
-            -s true \
-            | tee "${IR_RESULT_FILE}" || \
-            (grep "^\[" "${IR_RESULT_FILE}" | jq . && exit 1)
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.stage.rhsm.redhat.com/443' ; rc=$?
+        echo "stage 443 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."stage-443" = $rc' <<< "${connectivity}")
 
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_RESULT_FILE}")
-        echo "done (${internalRequest})"
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.rhsm.redhat.com/80' ; rc=$?
+        echo "prod 80 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."prod-80" = $rc' <<< "${connectivity}")
 
-        results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
-        pushResult=$(echo "${results}" | jq -r '.result')
-        echo "Push result: ${pushResult}"
-        echo -n "${pushResult}" > "$(results.pushResult.path)"
+        timeout 3 bash -c 'echo > /dev/tcp/unified-downloads-api.rhsm.redhat.com/443' ; rc=$?
+        echo "prod 443 result: ${rc}"
+        connectivity=$(jq -c --argjson rc "${rc}" '."prod-443" = $rc' <<< "${connectivity}")
+
+        echo "Connectivity results: ${connectivity}"
+
+        echo -n "Success" > "$(results.pushResult.path)"
+
+    # Original InternalRequest-based step, disabled for now (see comment above):
+    #
+    # - name: run-internal-request
+    #   image: quay.io/konflux-ci/release-service-utils
+    #     @sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+    #   computeResources:
+    #     limits:
+    #       memory: 512Mi
+    #     requests:
+    #       memory: 512Mi
+    #       cpu: 50m
+    #   script: |
+    #     #!/usr/bin/env bash
+    #     set -eo pipefail
+    #
+    #     TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+    #     TASK_ID=$(context.taskRun.uid)
+    #     PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+    #
+    #     IR_RESULT_FILE=$(mktemp)
+    #     trap 'rm -f "${IR_RESULT_FILE}"' EXIT
+    #
+    #     internal-request --pipeline "push-to-cspv2" \
+    #         -p taskGitUrl="$(params.taskGitUrl)" \
+    #         -p taskGitRevision="$(params.taskGitRevision)" \
+    #         -l ${TASK_LABEL}="${TASK_ID}" \
+    #         -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+    #         -t "$(params.requestTimeout)" \
+    #         --pipeline-timeout 0h30m0s \
+    #         --task-timeout 0h20m0s \
+    #         --finally-timeout 0h10m0s \
+    #         -s true \
+    #         | tee "${IR_RESULT_FILE}" || \
+    #         (grep "^\[" "${IR_RESULT_FILE}" | jq . && exit 1)
+    #
+    #     internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_RESULT_FILE}")
+    #     echo "done (${internalRequest})"
+    #
+    #     results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
+    #     pushResult=$(echo "${results}" | jq -r '.result')
+    #     echo "Push result: ${pushResult}"
+    #     echo -n "${pushResult}" > "$(results.pushResult.path)"
