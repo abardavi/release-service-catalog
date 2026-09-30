@@ -32,6 +32,14 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: ud2CertificateSecret
+      type: string
+      description: Secret containing the ud2 client certificate
+      default: cspv2-stage-crt
+    - name: ud2KeySecret
+      type: string
+      description: Secret containing the ud2 client key
+      default: cspv2-crt-key
   results:
     - name: pushResult
       description: Result of the operation (pass/fail)
@@ -43,6 +51,14 @@ spec:
           - key: $(params.caTrustConfigMapKey)
             path: ca-bundle.crt
         optional: true
+    - name: ud2-certificate
+      secret:
+        secretName: $(params.ud2CertificateSecret)
+        defaultMode: 0444
+    - name: ud2-key
+      secret:
+        secretName: $(params.ud2KeySecret)
+        defaultMode: 0444
   stepTemplate:
     securityContext:
       runAsUser: 1001
@@ -50,12 +66,20 @@ spec:
       - name: trusted-ca
         mountPath: /mnt/trusted-ca
         readOnly: true
+      - name: ud2-certificate
+        mountPath: /mnt/ud2-secrets/certificate
+        subPath: certificate
+        readOnly: true
+      - name: ud2-key
+        mountPath: /mnt/ud2-secrets/key
+        subPath: key
+        readOnly: true
   steps:
     # TEMPORARY: connectivity check inlined here (bypassing the InternalRequest) because
     # the rhtap-releng-tenant namespace is not yet in the internal-request allow list.
     # Revert to the run-internal-request step below once that's resolved.
     - name: run-internal-request
-      image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+      image: quay.io/abardavi/release-service-utils@sha256:f9402fc2cdff22ee789baaaed7637dbfc57f4739043456dccd21e5de1d1b9846
       computeResources:
         limits:
           memory: 512Mi
@@ -86,7 +110,26 @@ spec:
 
         echo "Connectivity results: ${connectivity}"
 
-        echo -n "Success" > "$(results.pushResult.path)"
+        SEARCH_OUTPUT_FILE=$(mktemp)
+        trap 'rm -f "${SEARCH_OUTPUT_FILE}"' EXIT
+
+        if ud2 product search --name quarkus > "${SEARCH_OUTPUT_FILE}" 2>&1; then
+          echo "ud2 search output:"
+          cat "${SEARCH_OUTPUT_FILE}"
+        else
+          echo "ud2 search command failed:"
+          cat "${SEARCH_OUTPUT_FILE}"
+          echo -n "Failed" > "$(results.pushResult.path)"
+          exit 1
+        fi
+
+        if [[ -s "${SEARCH_OUTPUT_FILE}" ]] && grep -qi "quarkus" "${SEARCH_OUTPUT_FILE}"; then
+          echo -n "Success" > "$(results.pushResult.path)"
+        else
+          echo "ud2 search output did not contain expected results"
+          echo -n "Failed" > "$(results.pushResult.path)"
+          exit 1
+        fi
 
     # Original InternalRequest-based step, disabled for now (see comment above):
     #
