@@ -79,7 +79,7 @@ spec:
     # the rhtap-releng-tenant namespace is not yet in the internal-request allow list.
     # Revert to the run-internal-request step below once that's resolved.
     - name: run-internal-request
-      image: quay.io/abardavi/release-service-utils@sha256:f9402fc2cdff22ee789baaaed7637dbfc57f4739043456dccd21e5de1d1b9846
+      image: quay.io/abardavi/release-service-utils@sha256:a6b4a59dfc07ee6a1c67a7978c48d5c8351abfd23dd8b0f4c3086285a7c24983
       computeResources:
         limits:
           memory: 512Mi
@@ -113,7 +113,7 @@ spec:
         SEARCH_OUTPUT_FILE=$(mktemp)
         trap 'rm -f "${SEARCH_OUTPUT_FILE}"' EXIT
 
-        if ud2 product search --name quarkus > "${SEARCH_OUTPUT_FILE}" 2>&1; then
+        if ud2 --config /home/ud2/config.ini product search --name quarkus > "${SEARCH_OUTPUT_FILE}" 2>&1; then
           echo "ud2 search output:"
           cat "${SEARCH_OUTPUT_FILE}"
         else
