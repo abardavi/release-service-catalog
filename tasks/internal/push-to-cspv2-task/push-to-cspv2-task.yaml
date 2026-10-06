@@ -1,0 +1,77 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-to-cspv2-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Internal task used as an initial setup for the push-to-cspv2 pipeline: it
+    downloads a small public OCI artifact from Quay with oras and verifies the
+    downloaded file's checksum matches the digest declared in the artifact's manifest.
+    This does not implement any CSPv2-specific logic; it's a basic starting point for
+    future development.
+  params:
+    - name: artifactRef
+      type: string
+      description: The OCI artifact reference to download with oras, used as a test fixture
+      default: quay.io/podman/hello:latest
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+    - name: expectedChecksum
+      description: sha256 checksum declared in the artifact's manifest
+    - name: actualChecksum
+      description: sha256 checksum of the downloaded file
+  steps:
+    - name: fetch-and-verify
+      image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 50m
+      env:
+        - name: ARTIFACT_REF
+          value: $(params.artifactRef)
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_EXPECTED_CHECKSUM
+          value: $(results.expectedChecksum.path)
+        - name: RESULT_ACTUAL_CHECKSUM
+          value: $(results.actualChecksum.path)
+      script: |
+        #!/usr/bin/env bash
+        set -eo pipefail
+
+        WORK_DIR=$(mktemp -d)
+        trap 'rm -rf "${WORK_DIR}"' EXIT
+
+        echo "Fetching manifest for ${ARTIFACT_REF}..."
+        manifest=$(oras manifest fetch --platform linux/amd64 "${ARTIFACT_REF}")
+        expected_checksum=$(jq -r '.layers[0].digest' <<< "${manifest}")
+        expected_checksum="${expected_checksum#sha256:}"
+
+        downloaded_file="${WORK_DIR}/layer.tar.gz"
+        echo "Fetching blob sha256:${expected_checksum} from ${ARTIFACT_REF}..."
+        oras blob fetch --output "${downloaded_file}" "${ARTIFACT_REF}@sha256:${expected_checksum}"
+
+        actual_checksum=$(sha256sum "${downloaded_file}" | awk '{print $1}')
+
+        echo "Expected checksum (from manifest): ${expected_checksum}"
+        echo "Actual checksum (downloaded file): ${actual_checksum}"
+
+        echo -n "${expected_checksum}" > "${RESULT_EXPECTED_CHECKSUM}"
+        echo -n "${actual_checksum}" > "${RESULT_ACTUAL_CHECKSUM}"
+
+        if [ "${expected_checksum}" = "${actual_checksum}" ]; then
+          echo -n "Success" > "${RESULT_RESULT}"
+        else
+          echo "Checksum mismatch between manifest and downloaded file"
+          echo -n "Failed" > "${RESULT_RESULT}"
+        fi
