@@ -80,6 +80,7 @@ CREATE_RESPONSE=$(curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
   "${CREATE_URL}" 2> /dev/null)
 
 # Check if creation was successful
+echo $CREATE_RESPONSE > /tmp/create_response.txt
 CREATED_REPO=$(echo "$CREATE_RESPONSE" | jq -r '.full_name // ""')
 if [ -z "${CREATED_REPO}" ]; then
   echo "🔴 error: failed to create repository ${full_repo_name}"
