@@ -5,7 +5,10 @@ metadata:
   annotations:
     git-provider: github
     build.appstudio.openshift.io/request: configure-pac
-    build.appstudio.openshift.io/pipeline: '{"name": "docker-build-oci-ta", "bundle": "latest"}'
+    # TODO: reconsider before opening the PR - using the "min" build pipeline to fit local
+    # cluster resource constraints; push-to-cspv2 ignores the built image either way, so this
+    # may actually be the better permanent choice too, not just a local workaround.
+    build.appstudio.openshift.io/pipeline: '{"name": "docker-build-oci-ta-min", "bundle": "latest"}'
     image.redhat.com/generate: '{"visibility": "public"}'
   name: ${component_name}
   labels:
