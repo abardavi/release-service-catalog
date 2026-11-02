@@ -1,0 +1,176 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-fetch-cspv2-artifacts
+spec:
+  description: >-
+    Run the fetch-cspv2-artifacts task
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)"
+
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
+              {
+                "components": [
+                  {
+                    "containerImage": "quay.io/mock/artifact@sha256:deadbeef",
+                    "name": "test-0.0.1"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+
+    - name: run-task
+      taskRef:
+        name: fetch-cspv2-artifacts
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+
+    - name: check-result
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: sourceDataArtifact
+            type: string
+            default: ""
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: "ORAS_OPTIONS"
+              value: "--insecure"
+            - name: "DEBUG"
+              value: ""
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:17925cd6c631c3828966457099f117c894eb01983b8639920bf82b1a5e1841d0
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              ARTIFACT_FILE="$(params.dataDir)/artifacts/mock-artifact.bin"
+              if [ ! -f "${ARTIFACT_FILE}" ]; then
+                echo "ERROR: fetched artifact not found at ${ARTIFACT_FILE}"
+                exit 1
+              fi
+
+              SHA256SUM_FILE="$(params.dataDir)/SHA256SUM"
+              if [ ! -f "${SHA256SUM_FILE}" ]; then
+                echo "ERROR: SHA256SUM file not found at ${SHA256SUM_FILE}"
+                exit 1
+              fi
+              if ! grep -q "  artifacts/mock-artifact.bin\$" "${SHA256SUM_FILE}"; then
+                echo "ERROR: SHA256SUM does not reference artifacts/mock-artifact.bin"
+                cat "${SHA256SUM_FILE}"
+                exit 1
+              fi
+
+              README_FILE="$(params.dataDir)/README.md"
+              if [ ! -f "${README_FILE}" ]; then
+                echo "ERROR: README.md not found at ${README_FILE}"
+                exit 1
+              fi
+              test "$(cat "${README_FILE}")" == "mock readme content"
+
+              echo "SUCCESS: fetched artifact, SHA256SUM, and README.md all present"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+      runAfter:
+        - run-task

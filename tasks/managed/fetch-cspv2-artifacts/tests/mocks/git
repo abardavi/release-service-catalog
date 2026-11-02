@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mock git: intercept "clone <url> <dest>" and create a fake provenance repo.
+if [[ "$1" == "clone" ]]; then
+  dest="$3"
+  mkdir -p "${dest}/release-artifact-docs"
+  echo "mock readme content" > "${dest}/release-artifact-docs/README.md"
+fi

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock oras: intercept "pull" and drop a fake artifact file in the current
+# directory (oras_pull() relies on cwd, not an -o flag).
+if [[ "$1" == "pull" ]]; then
+  echo "mock artifact content" > "mock-artifact.bin"
+fi
