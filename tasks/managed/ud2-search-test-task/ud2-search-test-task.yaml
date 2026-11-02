@@ -1,0 +1,89 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ud2-search-test-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: test
+spec:
+  description: Run a read-only UD2 product search and expose its output and exit code.
+  params:
+    - name: ud2CertificateSecret
+      type: string
+      description: Secret containing the UD2 client certificate.
+      default: cspv2-stage-crt
+    - name: ud2KeySecret
+      type: string
+      description: Secret containing the UD2 client key.
+      default: cspv2-crt-key
+    - name: caTrustConfigMapName
+      type: string
+      description: ConfigMap containing the trusted CA bundle.
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: Key in the ConfigMap containing the trusted CA bundle.
+      default: ca-bundle.crt
+  results:
+    - name: searchOutput
+      description: Combined stdout and stderr from the UD2 search command.
+    - name: exitCode
+      description: Numeric exit code returned by the UD2 search command.
+  volumes:
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+    - name: ud2-certificate
+      secret:
+        secretName: $(params.ud2CertificateSecret)
+        defaultMode: 0444
+    - name: ud2-key
+      secret:
+        secretName: $(params.ud2KeySecret)
+        defaultMode: 0444
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+      - name: ud2-certificate
+        mountPath: /mnt/ud2-secrets/certificate
+        subPath: certificate
+        readOnly: true
+      - name: ud2-key
+        mountPath: /mnt/ud2-secrets/key
+        subPath: key
+        readOnly: true
+  steps:
+    - name: search-product
+      image: quay.io/konflux-ci/release-service-utils@sha256:2e2551903acb8a36d6196e5c94dcb4ce5f98a4d1be0bf64f2cbdb5e697546e10
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+
+        output_file=$(mktemp)
+        trap 'rm -f "${output_file}"' EXIT
+
+        if ud2 --config /home/ud2/config.ini product search --name quarkus >"${output_file}" 2>&1; then
+          command_exit_code=0
+        else
+          command_exit_code=$?
+        fi
+
+        cat "${output_file}"
+        cat "${output_file}" > "$(results.searchOutput.path)"
+        printf '%s' "${command_exit_code}" > "$(results.exitCode.path)"
+        exit "${command_exit_code}"
