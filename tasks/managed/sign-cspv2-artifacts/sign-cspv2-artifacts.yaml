@@ -1,0 +1,301 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-cspv2-artifacts
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Sign the CSPv2 SHA256SUM manifest through the middleware-signing pipeline and add the detached signature
+    to the release data.
+  params:
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing fetched release artifacts, README.md, and SHA256SUM.
+    - name: keyname
+      type: string
+      description: Signing key name accepted by the middleware-signing pipeline.
+    - name: onbehalfof
+      type: string
+      description: Human identity requesting signing, for audit purposes.
+    - name: kerberosKeytabSecret
+      type: string
+      description: Secret in the signing PipelineRun namespace containing the signing Kerberos keytab.
+    - name: kerberosKeytab
+      type: string
+      description: Key within the Kerberos keytab secret.
+    - name: kerberosPrincipal
+      type: string
+      description: Kerberos principal used by the signing pipeline.
+    - name: signingPipeline
+      type: string
+      description: InternalRequest pipeline name for middleware signing.
+      default: middleware-signing
+    - name: signingRepo
+      type: string
+      description: Git repository containing the middleware-signing task and pipeline.
+      default: https://gitlab.cee.redhat.com/signing/signing.git
+    - name: signingRevision
+      type: string
+      description: Git revision of the signing repository to use.
+      default: main
+    - name: signingServiceAccount
+      type: string
+      description: Service account used by the internal signing PipelineRun.
+      default: release-service-account
+    - name: requestTimeout
+      type: string
+      description: Maximum time in seconds to wait for the InternalRequest.
+      default: "3900"
+    - name: pipelineTimeout
+      type: string
+      description: Timeout for the middleware-signing PipelineRun.
+      default: 1h0m0s
+    - name: taskTimeout
+      type: string
+      description: Timeout for the middleware-signing TaskRun.
+      default: 0h55m0s
+    - name: finallyTimeout
+      type: string
+      description: Timeout reserved for final tasks in the middleware-signing PipelineRun.
+      default: 0h5m0s
+    - name: verbose
+      type: string
+      description: Enable verbose Kerberos diagnostics in the signing pipeline.
+      default: "false"
+    - name: ociStorage
+      type: string
+      description: OCI repository for Trusted Artifacts.
+      default: empty
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration time for Trusted Artifacts created by this task.
+      default: 1d
+    - name: trustedArtifactsDebug
+      type: string
+      description: Enable Trusted Artifacts debug logging when non-empty.
+      default: ""
+    - name: orasOptions
+      type: string
+      description: Additional oras options for Trusted Artifact operations.
+      default: ""
+    - name: trustedArtifactsDockerconfigSecret
+      type: string
+      description: Secret containing registry credentials for the signing pipeline's Trusted Artifacts.
+      default: quay-token-konflux-release-trusted-artifacts-secret
+    - name: dataDir
+      type: string
+      description: Working directory for release data.
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: Git repository URL for resolving Trusted Artifact step actions.
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: Git revision for resolving Trusted Artifact step actions.
+      default: main
+    - name: caTrustConfigMapName
+      type: string
+      description: ConfigMap containing the CA bundle for Trusted Artifact operations.
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: Key in the CA ConfigMap containing the bundle.
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing the fetched release data and SHA256SUM.asc.
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: $(params.orasOptions)
+      - name: DEBUG
+        value: $(params.trustedArtifactsDebug)
+  steps:
+    - name: use-source-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: prepare-signing-input
+      image: quay.io/konflux-ci/release-service-utils@sha256:2e2551903acb8a36d6196e5c94dcb4ce5f98a4d1be0bf64f2cbdb5e697546e10
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      command: ["python3", "-m", "sign_cspv2_artifacts", "prepare"]
+      env:
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+    - name: create-signing-input-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)/signing-input
+        - name: sourceDataArtifact
+          value: $(params.dataDir)/signing-input-artifact.txt
+    - name: request-signature
+      image: quay.io/konflux-ci/release-service-utils@sha256:2e2551903acb8a36d6196e5c94dcb4ce5f98a4d1be0bf64f2cbdb5e697546e10
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      command: ["python3", "-m", "sign_cspv2_artifacts", "sign"]
+      env:
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_SIGNING_INPUT_ARTIFACT_FILE
+          value: $(params.dataDir)/signing-input-artifact.txt
+        - name: PARAM_SIGNING_OUTPUT_ARTIFACT_FILE
+          value: $(params.dataDir)/signed-output-artifact.txt
+        - name: PARAM_SIGNED_OUTPUT_DIR
+          value: $(params.dataDir)/signing-output
+        - name: PARAM_PIPELINERUN_UID
+          value: $(context.pipelineRun.uid)
+        - name: PARAM_TASK_RUN_UID
+          value: $(context.taskRun.uid)
+        - name: PARAM_SIGNING_PIPELINE
+          value: $(params.signingPipeline)
+        - name: PARAM_SIGNING_REPO
+          value: $(params.signingRepo)
+        - name: PARAM_SIGNING_REVISION
+          value: $(params.signingRevision)
+        - name: PARAM_KEYNAME
+          value: $(params.keyname)
+        - name: PARAM_ONBEHALFOF
+          value: $(params.onbehalfof)
+        - name: PARAM_KERBEROS_KEYTAB_SECRET
+          value: $(params.kerberosKeytabSecret)
+        - name: PARAM_KERBEROS_KEYTAB
+          value: $(params.kerberosKeytab)
+        - name: PARAM_KERBEROS_PRINCIPAL
+          value: $(params.kerberosPrincipal)
+        - name: PARAM_SIGNING_SERVICE_ACCOUNT
+          value: $(params.signingServiceAccount)
+        - name: PARAM_REQUEST_TIMEOUT
+          value: $(params.requestTimeout)
+        - name: PARAM_PIPELINE_TIMEOUT
+          value: $(params.pipelineTimeout)
+        - name: PARAM_TASK_TIMEOUT
+          value: $(params.taskTimeout)
+        - name: PARAM_FINALLY_TIMEOUT
+          value: $(params.finallyTimeout)
+        - name: PARAM_VERBOSE
+          value: $(params.verbose)
+        - name: PARAM_OCI_STORAGE
+          value: $(params.ociStorage)
+        - name: PARAM_OCI_ARTIFACT_EXPIRES_AFTER
+          value: $(params.ociArtifactExpiresAfter)
+        - name: PARAM_TRUSTED_ARTIFACTS_DEBUG
+          value: $(params.trustedArtifactsDebug)
+        - name: PARAM_ORAS_OPTIONS
+          value: $(params.orasOptions)
+        - name: PARAM_TRUSTED_ARTIFACTS_DOCKERCONFIG_SECRET
+          value: $(params.trustedArtifactsDockerconfigSecret)
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_TASK_GIT_URL
+          value: $(params.taskGitUrl)
+        - name: PARAM_TASK_GIT_REVISION
+          value: $(params.taskGitRevision)
+        - name: PARAM_CA_TRUST_CONFIG_MAP_NAME
+          value: $(params.caTrustConfigMapName)
+        - name: PARAM_CA_TRUST_CONFIG_MAP_KEY
+          value: $(params.caTrustConfigMapKey)
+    - name: add-detached-signature
+      image: quay.io/konflux-ci/release-service-utils@sha256:2e2551903acb8a36d6196e5c94dcb4ce5f98a4d1be0bf64f2cbdb5e697546e10
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      command: ["python3", "-m", "sign_cspv2_artifacts", "finalize"]
+      env:
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_SIGNED_OUTPUT_DIR
+          value: $(params.dataDir)/signing-output
+    - name: create-result-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
